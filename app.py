@@ -1,326 +1,255 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import yfinance as yf
-from keras.models import load_model
 import streamlit as st
+from keras.models import load_model, Sequential
+from keras.layers import LSTM, Dense, Dropout
 from sklearn.preprocessing import MinMaxScaler
 import os
-from datetime import datetime
-from googletrans import Translator
-import hashlib
-import base64
-from datetime import timedelta
+from datetime import datetime, timedelta
+import time
+import requests
+from alpha_vantage.timeseries import TimeSeries
 
-
-# Defining the start and end dates for the data
-start = '2000-01-01'
-end = '2023-11-11'
-
-# Applying CSS styling for the Streamlit app
-
+# Set page style
 st.markdown("""
     <style>
         body {
             font-family: 'Arial', sans-serif;
             background-color: #f8f9fa;
             color: #495057;
-            margin: 0;
-            padding: 0;
         }
-
         .title {
             font-size: 2em;
             color: #3171e0;
             text-align: center;
             padding: 1em;
         }
-
-        .input-label {
-            font-size: 1.2em;
-            color: #6c757d;
-            margin-top: 1em;
-        }
-
-        .user-input {
-            width: 50%;
-            padding: 0.5em;
-            font-size: 1em;
-            margin-bottom: 1em;
-        }
-
-        .subheader {
-            font-size: 1.5em;
-            color: #495057;
-            margin-top: 1em;
-        }
-
-        .data-description {
-            margin-top: 1em;
-        }
-
-        .chart {
-            width: 80%;
-            margin: 2em auto;
-        }
-
-        .checkbox-label {
-            font-size: 1em;
-            color: #6c757d;
-        }
-
-        .moving-average-plot {
-            width: 80%;
-            margin: 2em auto;
-        }
-
-        .closing-price-plot {
-            width: 80%;
-            margin: 2em auto;
-        }
-
-        .feedback-section {
-            margin-top: 2em;
-        }
-
-        .feedback-label {
-            font-size: 1.2em;
-            color: #6c757d;
-            margin-top: 1em;
-        }
-
-        .feedback-input {
-            width: 70%;
-            padding: 0.5em;
-            font-size: 1em;
-            margin-bottom: 1em;
-        }
-
-        .feedback-button {
-            padding: 0.5em 1em;
-            font-size: 1em;
-            background-color: #28a745;
-            color: #fff;
-            border: none;
-            cursor: pointer;
-        }
-
-        .error-message {
-            color: #dc3545;
-            font-size: 1.2em;
-            margin-top: 1em;
-        }
-
-        .success-message {
-            color: #28a745;
-            font-size: 1.2em;
-            margin-top: 1em;
-        }
     </style>
 """, unsafe_allow_html=True)
-# Login and Signup for  sequrity
-def make_account():
-    email = st.text_input("Enter your email:")
-    username = st.text_input("Enter a username:")
-    password = st.text_input("Enter a password:", type="password")
-    confirm_password = st.text_input("Confirm password:", type="password")
-    
-    if st.button("Sign Up") and password == confirm_password:
-        # Save user information to email.txt
-        with open("email.txt", "a") as f:
-            f.write(f"{email}\n")
 
-        # Save user information to files
-        with open(f"{username}_username.txt", "w") as f:
-            f.write(username)
-        with open(f"{username}_password.txt", "w") as f:
-            f.write(password)
-        with open(f"{username}_email.txt", "w") as f:
-            f.write(email)
-        st.success("Account created successfully!")
+# Set date ranges
+end = (datetime.today() - timedelta(days=1)).strftime('%Y-%m-%d')  # Last trading day (July 04, 2025)
+start_training = (datetime.today() - timedelta(days=3*365)).strftime('%Y-%m-%d')  # 3 years ago (July 06, 2022)
+start_display = (datetime.today() - timedelta(days=30)).strftime('%Y-%m-%d')  # Last 30 days
+
+# Authentication functions
+def make_account():
+    email = st.text_input("Enter your email:", key="signup_email")
+    username = st.text_input("Enter a username:", key="signup_username")
+    password = st.text_input("Enter a password:", type="password", key="signup_password")
+    confirm_password = st.text_input("Confirm password:", type="password", key="signup_confirm_password")
+    if st.button("Sign Up"):
+        if password != confirm_password:
+            st.error("❌ Passwords do not match.")
+            return
+        if not email or not username or not password:
+            st.error("❌ All fields are required.")
+            return
+        try:
+            with open("email.txt", "a") as f:
+                f.write(f"{email}\n")
+            with open(f"{username}_username.txt", "w") as f:
+                f.write(username)
+            with open(f"{username}_password.txt", "w") as f:
+                f.write(password)
+            with open(f"{username}_email.txt", "w") as f:
+                f.write(email)
+            st.success("✅ Account created successfully!")
+        except Exception as e:
+            st.error(f"❌ Error creating account: {e}")
 
 def login():
-    username = st.text_input("Enter your username:")
-    password = st.text_input("Enter your password:", type="password")
-    
+    username = st.text_input("Enter your username:", key="login_username")
+    password = st.text_input("Enter your password:", type="password", key="login_password")
     if st.button("Log In"):
         check(username, password)
 
 def check(username, password):
     username_file_path = f"{username}_username.txt"
     password_file_path = f"{username}_password.txt"
-
     if os.path.exists(username_file_path) and os.path.exists(password_file_path):
         stored_username = open(username_file_path).read().strip()
         stored_password = open(password_file_path).read().strip()
-
         if username == stored_username and password == stored_password:
-            st.success("Successful login")
-            # Set authentication status in session_state
+            st.success("✅ Successful login")
             st.session_state.authenticated = True
         else:
-            st.error('Incorrect username or password')
+            st.error('❌ Incorrect username or password')
     else:
-        st.error("Account not found. Please sign up.")
+        st.error("❌ Account not found. Please sign up.")
 
-# Check if the user is authenticated
 if 'authenticated' not in st.session_state:
-    st.sidebar.title("Login / Sign Up")
-    login()
-    st.sidebar.markdown("---")
-    make_account()
+    st.session_state.authenticated = False
 
-# Check if the user is authenticated before proceeding
-if 'authenticated' in st.session_state and st.session_state.authenticated:
-    # Rest of your existing code here
+st.sidebar.title("🔐 Login / Sign Up")
+login()
+st.sidebar.markdown("---")
+make_account()
 
-    # Asking the user to enter the stock ticker symbol
-    user_input = st.text_input('Enter Stock Ticker', 'Enter Stock Code')
+# Main app if authenticated
+if st.session_state.authenticated:
+    st.title("📈 Stock Price Viewer")
 
-    # Downloading the historical data from Yahoo Finance
-    df = yf.download(user_input, start=start, end=end)
+    ticker = st.text_input(
+        'Enter Stock Ticker Symbol (e.g., AAPL for Apple, MSFT for Microsoft)',
+        'AAPL'
+    ).upper()
 
-    # Showing the descriptive statistics of the data
-    st.subheader('Data from 2000 - 2023')
-    st.write(df.describe())
+    # Check internet connection
+    def check_internet():
+        try:
+            requests.get("https://www.google.com", timeout=5)
+            return True
+        except requests.ConnectionError:
+            return False
 
-    # Plotting the closing price vs time chart
-    st.subheader('Closing Price vs Time chart')
-    fig = plt.figure(figsize=(12, 6))
-    plt.plot(df.Close)
-    plt.xlabel('Date')
-    plt.ylabel('Closing Price')
-    plt.title(f'Closing Price of {user_input} from 2000 to 2023')
-    st.pyplot(fig)
+    # Download data with Alpha Vantage
+    def fetch_data(ticker, start, end, api_key, max_retries=5):
+        if not check_internet():
+            st.error("❌ No internet connection. Please check your network.")
+            return None
+        for attempt in range(max_retries):
+            try:
+                ts = TimeSeries(key=api_key, output_format='pandas')
+                df, meta = ts.get_daily(symbol=ticker, outputsize='full')
+                df.index = pd.to_datetime(df.index)
+                df = df[start:end].sort_index()
+                if df.empty:
+                    st.warning(f"Attempt {attempt + 1}/{max_retries}: No data in range {start} to {end}. Retrying with full history...")
+                    df = df.sort_index()  # Fallback to all available data
+                if not df.empty:
+                    st.success(f"✅ Data loaded for {ticker} from {start} to {end}")
+                    return df
+                time.sleep(2 ** attempt)
+            except Exception as e:
+                st.warning(f"Attempt {attempt + 1}/{max_retries}: Error - {e}. Retrying...")
+                time.sleep(2 ** attempt)
+        st.error(f"❌ Failed to fetch data after {max_retries} attempts. Verify API key, ticker ({ticker}), or try again later.")
+        return None
 
-    # Allow users to customize the moving averages
-    show_ma50 = st.checkbox('Show 50-day MA')
-    show_ma100 = st.checkbox('Show 100-day MA')
-    show_ma200 = st.checkbox('Show 200-day MA')
+    # Replace with your own API key
+    API_KEY = "YOUR_API_KEY_HERE"  # Obtain from https://www.alphavantage.co/support/#api-key
 
-    # Calculating and plotting the moving averages based on user input
-    if show_ma50:
-        ma50 = df.Close.rolling(50).mean()
-        plt.plot(ma50, 'y', label='50-day MA')
-    if show_ma100:
-        ma100 = df.Close.rolling(100).mean()
-        plt.plot(ma100, 'r', label='100-day MA')
-    if show_ma200:
-        ma200 = df.Close.rolling(200).mean()
-        plt.plot(ma200, 'g', label='200-day MA')
-
-    # Plotting the closing price
-    plt.plot(df.Close, 'b', label='Closing Price')
-    plt.xlabel('Date')
-    plt.ylabel('Price')
-    plt.title(f'Closing Price and Moving Averages of {user_input} from 2000 to 2023')
-    plt.legend()
-    st.pyplot(fig)
-
-    # Splitting the data into training and testing sets
-    data_training = pd.DataFrame(df['Close'][0:int(len(df) * 0.70)])
-    data_testing = pd.DataFrame(df['Close'][int(len(df) * 0.70):int(len(df))])
-
-    # Scaling the data to the range of 0 to 1
-    scaler = MinMaxScaler(feature_range=(0, 1))
-    data_training_array = scaler.fit_transform(data_training)
-
-    # Creating the input and output sequences for the training data
-    x_train = []
-    y_train = []
-    for i in range(100, data_training_array.shape[0]):
-        x_train.append(data_training_array[i - 100:i])
-        y_train.append(data_training_array[i, 0])
-    x_train, y_train = np.array(x_train), np.array(y_train)
-
-    # Setting the model file path
-    model_file_path = 'ker_model.h5'
-
-    # Loading the pre-trained model from the file path
-    model = None  # Initialize model to None
-
-    # Check if the file exists
-    if os.path.exists(model_file_path):
-        model = load_model(model_file_path)
-
-    # Testing the model on the testing data
-    if model is not None:
-        # Concatenating the last 100 days of the training data and the testing data
-        past_100_days = data_training.tail(100)
-        final_df = pd.concat([past_100_days, data_testing], ignore_index=True)
-
-        # Scaling the final data
-        input_data = scaler.fit_transform(final_df)
-
-        # Creating the input and output sequences for the testing data
-        x_test = []
-        y_test = []
-        for i in range(100, input_data.shape[0]):
-            x_test.append(input_data[i - 100:i])
-            y_test.append(input_data[i, 0])
-        x_test, y_test = np.array(x_test), np.array(y_test)
-
-        # Predicting the closing prices using the model
-        y_predicted = model.predict(x_test)
-
-        # Rescaling the predicted and actual values to the original scale
-        scaler = scaler.scale_
-        scale_factor = 1 / scaler[0]
-        y_predicted = y_predicted * scale_factor
-        y_test = y_test * scale_factor
-
-        # Plotting the predicted and actual prices
-        st.subheader('Prediction vs Original')
-        fig2 = plt.figure(figsize=(12, 6))
-        plt.plot(y_test, 'b', label='Original Price')
-        plt.plot(y_predicted, 'r', label='Predicted Price')
-        plt.xlabel('Time')
-        plt.ylabel('Price')
-        plt.title(f'Prediction vs Original Price of {user_input} from 2000 to 2023')
-        plt.legend()
-        st.pyplot(fig2)
+    df = fetch_data(ticker, start_training, end, API_KEY)
+    if df is not None and '4. close' in df.columns:
+        df['Close'] = df['4. close']
     else:
-        # Displaying an error message if the model file is not found
-        st.error(f"Model file '{model_file_path}' not found.")
+        df = None
+        st.error("❌ No data or invalid format. Check API key, ticker, or internet.")
 
-    # User feedback section
-    # User feedback section with a placeholder
-    # User feedback section with directions and emoji
-    st.subheader('User Feedback 📣')
-    st.markdown("""
-        Provide your feedback in the text area below. 
-        You can share your thoughts, suggestions, or report issues. 
-        Let us know how we can improve! 🚀
-    """)
+    if df is not None:
+        st.success(f"✅ Data loaded for {ticker} from {start_training} to {end}")
 
-    # Get user feedback
-    user_feedback = st.text_area('Feedback', value='Type your feedback here...')
+        # Filter for last 30 days for display
+        df_display = df[start_display:end]
 
-    # Check if user entered meaningful feedback before submission
-    if user_feedback != 'Type your feedback here...' and st.button('Submit Feedback'):
-        # Save feedback to a file
-        feedback_folder = 'user_feedback'
-        os.makedirs(feedback_folder, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        feedback_file_path = os.path.join(feedback_folder, f'feedback_{timestamp}.txt')
-        
-        with open(feedback_file_path, 'w') as feedback_file:
-            feedback_file.write(user_feedback)
+        # Data summary
+        st.subheader(f'Data Summary (Last 30 Days)')
+        st.write(df_display.describe())
 
-        # Process the feedback (you can store it, analyze it, etc.)
-        st.success('Feedback submitted successfully! Thank you for your input! 🙌')
-    elif st.button('Submit Feedback'):
-        # Display a message if the user didn't provide meaningful feedback
-        st.warning('Please provide meaningful feedback before submitting.')
+        # Closing price plot (last 30 days)
+        st.subheader('📉 Closing Price Over Time (Last 30 Days)')
+        fig = plt.figure(figsize=(12, 6))
+        plt.plot(df_display.index, df_display['Close'], label='Closing Price', color='blue')
+        plt.xlabel('Date')
+        plt.ylabel('Closing Price')
+        plt.title(f'{ticker} Closing Price (Last 30 Days)')
+        plt.legend()
+        st.pyplot(fig)
+
+        # LSTM prediction for future days based on 3 years of data
+        st.subheader('🔮 Stock Price Prediction (Next N Days)')
+        future_days = st.slider('Select number of future days to predict', min_value=1, max_value=7, value=3)  # Limit to 7 days
+
+        # Prepare data (use all 3 years for training)
+        data = df['Close'].values.reshape(-1, 1)
+        scaler = MinMaxScaler(feature_range=(0, 1))
+        scaled_data = scaler.fit_transform(data)
+
+        # Use all 3 years as training data
+        train_data = scaled_data
+
+        # Create sequences for training
+        sequence_length = 30  # Adjusted to fit within 3 years, using last 30 days as sequence
+        x_train, y_train = [], []
+        if len(train_data) > sequence_length:
+            for i in range(sequence_length, len(train_data)):
+                x_train.append(train_data[i-sequence_length:i, 0])
+                y_train.append(train_data[i, 0])
+            x_train, y_train = np.array(x_train), np.array(y_train)
+            x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+        else:
+            st.error("❌ Insufficient data for training. Need at least 30 days.")
+            x_train, y_train = np.array([]), np.array([])
+
+        # Load or train model
+        model_file_path = 'ker_model_3y.h5'  # Unique filename for 3-year model
+        model = None
+        if os.path.exists(model_file_path):
+            try:
+                model = load_model(model_file_path)
+                st.success("✅ Loaded existing model for prediction.")
+            except Exception as e:
+                st.warning(f"⚠️ Error loading model: {e}. Training a new model...")
+        else:
+            st.warning("⚠️ No pre-trained model found. Training a new model...")
+
+        if model is None and len(x_train) > 0:
+            model = Sequential()
+            model.add(LSTM(units=50, return_sequences=False, input_shape=(sequence_length, 1)))
+            model.add(Dropout(0.2))
+            model.add(Dense(units=1))
+            model.compile(optimizer='adam', loss='mean_squared_error')
+            model.fit(x_train, y_train, epochs=10, batch_size=16, verbose=0)  # Reduced epochs for speed
+            model.save(model_file_path)
+            st.success("✅ New model trained and saved.")
+
+        # Future prediction
+        if model is not None and len(x_train) > 0:
+            last_sequence = scaled_data[-sequence_length:]  # Use last 30 days from 3 years
+            future_predictions = []
+
+            current_input = last_sequence.reshape((1, sequence_length, 1))
+            for _ in range(future_days):
+                next_pred_scaled = model.predict(current_input, verbose=0)
+                future_predictions.append(next_pred_scaled[0, 0])
+                current_input = np.roll(current_input, -1, axis=1)
+                current_input[0, -1, 0] = next_pred_scaled[0, 0]
+
+            future_predictions = np.array(future_predictions).reshape(-1, 1)
+            future_predictions_rescaled = scaler.inverse_transform(future_predictions).flatten()
+
+            last_date = df_display.index[-1]  # Start from the last 30-day point
+            future_dates = [last_date + timedelta(days=i) for i in range(1, future_days + 1)]
+
+            st.subheader(f'Next {future_days} Days Forecast for {ticker} (Based on 3 Years)')
+            fig4 = plt.figure(figsize=(12, 6))
+            plt.plot(df_display.index, df_display['Close'], label='Historical Price (Last 30 Days)', color='blue')
+            plt.plot(future_dates, future_predictions_rescaled, label='Forecast', color='red', linestyle='--', marker='o')
+            plt.xlabel('Date')
+            plt.ylabel('Price')
+            plt.title(f'{ticker} Closing Price Forecast')
+            plt.legend()
+            st.pyplot(fig4)
+        else:
+            st.warning("⚠️ Prediction skipped due to insufficient data or model issues.")
+
+        # Feedback section
+        st.subheader('💬 User Feedback')
+        st.markdown("Provide your feedback below. Let us know how we can improve! 🚀")
+        user_feedback = st.text_area('Feedback', value='', placeholder='Type your feedback here...')
+        if st.button('Submit Feedback'):
+            if user_feedback.strip():
+                feedback_folder = 'user_feedback'
+                os.makedirs(feedback_folder, exist_ok=True)
+                timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                feedback_file_path = os.path.join(feedback_folder, f'feedback_{timestamp}.txt')
+                with open(feedback_file_path, 'w') as feedback_file:
+                    feedback_file.write(user_feedback)
+                st.success('✅ Feedback submitted! Thank you! 🙌')
+            else:
+                st.warning('⚠️ Please provide meaningful feedback.')
+
 else:
-    st.warning("You need to log in to access the app.")
-
-
-
-
-
-
-
-
-
-
+    st.warning("🔐 Please log in to access the app.")
